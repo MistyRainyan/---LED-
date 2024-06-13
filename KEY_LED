@@ -1,0 +1,228 @@
+OUTBIT equ 08002h ; 位控制口 
+OUTSEG equ 08004h ; 段控制口
+IN_KEY equ 08001h ; 键盘读入口  
+data segment
+LEDBuf db 6 dup(?) ; 显示缓冲
+Num db 1 dup(?) ; 显示的数据
+DelayT db 1 dup(?)
+LEDMAP:                            ; 八段管显示码
+db 3fh, 06h, 5bh, 4fh, 66h, 6dh, 7dh, 07h;01234567
+db 7fh, 6fh, 77h, 7ch, 39h, 5eh, 79h, 71h ;89ABCDE
+KeyTable:                            ; 键码定义，矩阵扫描，按键编码
+db 16h, 15h, 14h, 0ffh
+db 13h, 12h, 11h, 10h
+db 0dh, 0ch, 0bh, 0ah
+db 0eh, 03h, 06h, 09h
+db 0fh, 02h, 05h, 08h
+db 00h, 01h, 04h, 07h
+data ends
+code segment
+assume cs:code, ds:data
+Delay proc near
+	push ax ; 延时子程序
+	push cx
+	mov al, 0	;可以通过给ah赋值来决定延迟时间
+	mov cx,ax
+	loop $
+
+	pop cx
+ 	pop ax
+	ret
+Delay endp
+
+;数码显示
+DisplayLED proc near
+	mov bx, offset LEDBuf                        ;偏移地址给bx
+	mov cl, 6 ; 共6个八段管
+	mov ah, 00100000b ; 总共6个管，从左边开始显示	;ah用来决定哪一个数码管显示
+DLoop:
+	mov dx, OUTBIT			;位控制口给dx ；
+	mov al, 0
+	out dx,al ; 关所有八段管;熄灭所有数码管
+	mov al, [bx]			;LED缓冲中的第一个数给al
+	mov dx, OUTSEG			;段控制口给dx； 
+	out dx,al 				;先把要显示的字符送段控制口
+	mov dx, OUTBIT			;位控制口给dx
+	mov al, ah			;决定要使哪一个八段管显示
+	out dx, al ; 显示一位八段管 		;使该八段管显示
+	push ax				;ax压栈
+	mov ah, 1				;设置延迟时间
+	call Delay				;延迟一下
+	pop ax 				;出栈
+	shr ah, 1				;逻辑右移一位（换下一个八段管显示）
+	inc bx				;bx加一（换下一个要显示的字符）
+	dec cl				;cl减一（循环次数减一）
+	jnz DLoop 			;cl不是0则跳转
+	mov dx, OUTBIT
+	mov al, 0
+	out dx,al ; 关所有八段管
+	ret
+DisplayLED endp
+
+;循环显示数字8的编码，即键4的功能
+DisplayLED1 proc near
+	mov cl, 6 ; 共6个八段管
+	mov ah, 00000001b ; 从左边开始显示
+DLoop1:
+mov dx, OUTBIT
+mov al, 0
+out dx,al ; 关所有八段管
+
+mov al,7fh	;7fh是8的八段码，设置显示8
+mov dx, OUTSEG
+out dx,al
+
+mov dx, OUTBIT
+mov al, ah
+out dx, al ; 显示一位八段管 ，设置那个管显示
+
+push ax
+mov ah, 120	;设置延迟时间
+call Delay
+pop ax
+shl ah, 1		;逻辑左移一位，换下一个八段管显示
+dec cl
+call TestKey ; 有键入?
+je L ; 无键入, 继续
+jmp t1
+L:jnz DLoop1
+mov dx, OUTBIT
+mov al, 0
+out dx,al ; 关所有八段管
+ret
+DisplayLED1 endp
+
+TestKey proc near
+	mov dx, OUTBIT
+	mov al, 0
+	out dx, al ; 输出线置为0（低电平）   
+	mov dx, IN_KEY
+	in al, dx ; 读入键状态
+	not al
+	and al, 0fh ; 高四位不用
+	ret
+TestKey endp
+;如果无键入，那么标志位zf为1
+; 初始化和设置列掩码:
+GetKey proc near
+	mov ch, 00100000b  ; 这个值用作列控制，指示从最高位列开始扫描。
+	mov cl, 6    ;总共6列
+; 列扫描循环 (KLoop):
+KLoop:
+	mov dx, OUTBIT;将位控制口的地址加载到 DX 寄存器
+	mov al, ch ; 将列掩码加载到 AL 寄存器。
+	not al      ;11011111, 取反操作，使得当前被扫描的列为低电平（激活状态），其他列为高电平。
+	out dx, al		;输出修改后的列掩码到位控制口，设置键盘的列线状态。
+	shr ch, 1		;逻辑右移，如果该列无键入，用来检查下一列
+	mov dx, IN_KEY	;键盘读入口地址送dx
+	in al, dx		;从键盘输入口读取行的状态。
+	not al		;
+	and al, 0fh	;如果有一位键入，此时al有一位为1，这一位决定是哪一行有键入
+	jne Goon_ 	;如果结果非零（表示某行有键被按下），跳转到 Goon_ 标签处理按键。
+; 列扫描完成
+	dec cl		;该列没有键入，循环次数减一
+	jnz KLoop 	; 如果还有列未扫描，继续循环。
+	mov cl, 0ffh 	;每一列都扫描完了， 没有键按下, 返回 0ffh
+
+	jmp Exit1
+
+; 按键处理
+Goon_:
+			;有键入，求出是哪个键
+	dec cl		;cl此时可以充当列值
+	shl cl, 1	; 键值 = 列 X 4 + 行，左移两位相当于乘4
+	shl cl, 1
+	mov ch, 4		;4行
+;扫描矩阵键盘并获得用户输入的按键码
+LoopC:
+	test al, 1		;检查是否为第一行
+	jnz Exit1		;不是就跳转到Exit1。
+	shr al, 1		;右移一位，最高位用0填充
+	inc cl		;键值=列 X 4+行，inc cl 相当于其中的+行
+	dec ch		;换一行检查
+	jnz LoopC
+
+; 键码查表
+Exit1:
+	mov dx, OUTBIT
+	mov al, 0
+	out dx, al 			;八段管显示0
+	mov ch, 0			;屏蔽高位
+	mov bx, offset KeyTable	;键码表的偏移地址
+	add bx, cx		;表内偏移量cx，前面屏蔽了高位
+	mov al, [bx] ; 取出键码
+	mov bl, al
+
+; 等待按键释放
+WaitRelease:
+	mov dx, OUTBIT
+	mov al, 0
+	out dx, al ; 等键释放
+	mov ah, 10; 使用延时来稳定键盘读取状态
+	call Delay
+	call TestKey ; 再次调用键盘测试过程以确认按键已释放
+	jne WaitRelease;键没释放
+	mov al, bl
+	ret
+GetKey endp
+
+Start proc near
+	mov ax, data
+	mov ds, ax
+	;8255还没初始化
+B:
+;类似于赋初值
+	mov LEDBuf, 0 ; 不显示
+	mov LEDBuf+1, 0
+	mov LEDBuf+2, 0
+	mov LEDBuf+3, 0
+	mov LEDBuf+4, 0
+	mov LEDBuf+5, 0
+MLoop:
+	call DisplayLED ; 显示
+	call TestKey ; 有键入?
+	je MLoop ; 无键入, 继续显示
+;有键入，转到t1
+t1: 	call GetKey ; 读入键码
+	and al, 0fh ; 显示键码
+	mov ah, 0		;屏蔽高位
+	cmp al,01h
+	jz p1
+	cmp al,02h
+	jz p2
+	cmp al,03h
+	jz p3
+	cmp al,04h
+	jz p4
+	jmp B		;都不是则继续显示000000
+p1:
+	mov LEDBuf,5bh		;2
+	mov LEDBuf+1,3fh		;0
+	mov LEDBuf+2,5bh		;2
+	mov LEDBuf+3,66h		;4
+	mov LEDBuf+4,0		;
+	mov LEDBuf+5,0		;
+	jmp Mloop
+p2:
+	mov LEDBuf,3Fh		;0
+	mov LEDBuf+1,6Dh		;5
+	mov LEDBuf+2,4fh		;3
+	mov LEDBuf+3,06h		;1
+	mov LEDBuf+4,0
+	mov LEDBuf+5,0
+	jmp Mloop
+p3:
+	mov LEDBuf,6fh		;g
+	mov LEDBuf+1,3fh		;0
+	mov LEDBuf+2,3fh		;0
+	mov LEDBuf+3,5eh		;d
+	mov LEDBuf+4,0		;
+	mov LEDBuf+5,0		;
+	jmp Mloop
+p4: 	call DisplayLED1
+	call TestKey ; 有键入?
+	je p4 ; 无键入, 继续显示
+	jmp t1
+Start endp
+code ends
+end start
